@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1a1412">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg">
+<link rel="apple-touch-icon" href="icon.svg">
+<title>My Journal</title>
+<style>
+:root{--bg:#1a1412;--card:#261d19;--line:#3a2d26;--text:#efe3d3;--dim:#a8957f;--accent:#e8a35c}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 Georgia,serif;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+.wrap{max-width:680px;margin:0 auto;padding:16px}
+header{display:flex;gap:8px;align-items:center;margin-bottom:12px}
+h1{font-size:22px;margin:0;flex:1;color:var(--accent)}
+button,input,textarea{font:inherit;color:inherit}
+button{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 14px;cursor:pointer}
+button.pri{background:var(--accent);color:#1a1412;border:0;font-weight:bold}
+input,textarea{width:100%;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:10px}
+textarea{min-height:240px;resize:vertical}
+.entry{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:10px;cursor:pointer}
+.entry small,.dim{color:var(--dim)}
+.entry p{margin:4px 0;white-space:pre-wrap;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.chip{display:inline-block;background:var(--line);border-radius:99px;padding:1px 10px;margin:0 6px 4px 0;font:13px sans-serif;cursor:pointer}
+.chip.on{background:var(--accent);color:#1a1412}
+.moods button{font-size:24px;padding:4px 10px;margin-right:6px;opacity:.45}
+.moods button.on{opacity:1;border-color:var(--accent)}
+.strip{display:flex;gap:4px;margin:8px 0 14px;font-size:20px;overflow-x:auto}
+.strip span{text-align:center;font:11px sans-serif;color:var(--dim);min-width:34px}
+.strip b{display:block;font-size:20px;font-weight:normal;min-height:28px}
+.photos img{height:90px;border-radius:8px;margin:0 6px 6px 0}
+.hide{display:none}
+#status{font:12px sans-serif;color:var(--dim)}
+</style>
+</head>
+<body>
+<div class="wrap">
+ <div id="list">
+  <header><h1>📓 My Journal</h1><button id="sync">Sign in</button><button class="pri" id="new">+ New</button></header>
+  <div id="status"></div>
+  <div class="strip" id="strip"></div>
+  <input id="q" placeholder="Search entries…">
+  <div id="tags"></div>
+  <div id="entries"></div>
+ </div>
+ <div id="edit" class="hide">
+  <header><button id="back">← Back</button><h1></h1><button id="del">Delete</button><button class="pri" id="save">Save</button></header>
+  <input id="date" type="date">
+  <input id="title" placeholder="Title (optional)">
+  <div class="moods" id="moods"></div><br>
+  <textarea id="text" placeholder="What's on your mind?"></textarea>
+  <input id="etags" placeholder="Tags, separated by commas">
+  <div class="photos" id="photos"></div>
+  <button id="addph">📷 Add photo</button>
+  <input id="file" type="file" accept="image/*" multiple class="hide">
+ </div>
+</div>
+<script src="https://accounts.google.com/gsi/client" async></script>
+<script>
+// ===== SETUP: paste your Google OAuth Client ID here =====
+const CLIENT_ID = 'PASTE_YOUR_CLIENT_ID.apps.googleusercontent.com';
+// =========================================================
+const MOODS = ['😞','😕','😐','🙂','😄'];
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const today = () => new Date().toISOString().slice(0,10);
+
+// ---- local storage (IndexedDB) ----
+const dbp = new Promise(r => { const q = indexedDB.open('journal',1); q.onupgradeneeded = () => q.result.createObjectStore('e',{keyPath:'id'}); q.onsuccess = () => r(q.result); });
+const tx = async (m,f) => { const d = await dbp; return new Promise((res,rej) => { const t = d.transaction('e',m); const r = f(t.objectStore('e')); t.oncomplete = () => res(r.result); t.onerror = rej; }); };
+const all = () => tx('readonly', s => s.getAll());
+const put = e => tx('readwrite', s => s.put(e));
+const rm = id => tx('readwrite', s => s.delete(id));
+
+let entries = [], cur = null, filterTag = null, token = null, tokenClient = null, folderId = localStorage.folderId || null;
+
+// ---- list view ----
+async function load() { entries = (await all()).filter(e => !e.deleted).sort((a,b) => b.date.localeCompare(a.date) || b.updated - a.updated); render(); }
+function render() {
+  const q = $('q').value.toLowerCase();
+  const tagSet = [...new Set(entries.flatMap(e => e.tags))].sort();
+  $('tags').innerHTML = tagSet.map(t => `<span class="chip ${t===filterTag?'on':''}" data-t="${esc(t)}">#${esc(t)}</span>`).join('');
+  const shown = entries.filter(e => (!filterTag || e.tags.includes(filterTag)) && (!q || (e.title+' '+e.text+' '+e.tags.join(' ')).toLowerCase().includes(q)));
+  $('entries').innerHTML = shown.map(e => `<div class="entry" data-id="${e.id}"><small>${e.date} ${e.mood!=null?MOODS[e.mood]:''} ${e.dirty?'· unsynced':''}</small><b> ${esc(e.title)}</b><p>${esc(e.text)}</p>${e.tags.map(t=>`<span class="chip">#${esc(t)}</span>`).join('')}${e.photos.length?'<small>📷 '+e.photos.length+'</small>':''}</div>`).join('') || '<p class="dim">No entries yet. Tap + New.</p>';
+  const days = [...Array(14)].map((_,i) => { const d = new Date(Date.now()-(13-i)*864e5).toISOString().slice(0,10); const m = entries.filter(e => e.date===d && e.mood!=null); return `<span><b>${m.length?MOODS[m[0].mood]:'·'}</b>${d.slice(8)}</span>`; });
+  $('strip').innerHTML = days.join('');
+}
+$('q').oninput = render;
+$('tags').onclick = e => { const t = e.target.dataset.t; if (t) { filterTag = filterTag===t ? null : t; render(); } };
+$('entries').onclick = e => { const el = e.target.closest('.entry'); if (el) openEntry(entries.find(x => x.id===el.dataset.id)); };
+$('new').onclick = () => openEntry(null);
+
+// ---- editor ----
+function openEntry(e) {
+  cur = e ? {...e, photos:[...e.photos]} : {id:crypto.randomUUID(), date:today(), title:'', text:'', mood:null, tags:[], photos:[]};
+  $('date').value = cur.date; $('title').value = cur.title; $('text').value = cur.text; $('etags').value = cur.tags.join(', ');
+  $('del').style.display = e ? '' : 'none';
+  drawMoods(); drawPhotos();
+  $('list').classList.add('hide'); $('edit').classList.remove('hide');
+}
+const drawMoods = () => $('moods').innerHTML = MOODS.map((m,i) => `<button data-i="${i}" class="${cur.mood===i?'on':''}">${m}</button>`).join('');
+$('moods').onclick = e => { const i = e.target.dataset.i; if (i!=null) { cur.mood = cur.mood==i ? null : +i; drawMoods(); } };
+const drawPhotos = () => $('photos').innerHTML = cur.photos.map((p,i) => `<img src="${p}" data-i="${i}" title="Tap to remove">`).join('');
+$('photos').onclick = e => { if (e.target.dataset.i && confirm('Remove this photo?')) { cur.photos.splice(+e.target.dataset.i,1); drawPhotos(); } };
+$('addph').onclick = () => $('file').click();
+$('file').onchange = async () => {
+  for (const f of $('file').files) {
+    const bmp = await createImageBitmap(f), s = Math.min(1, 1200/Math.max(bmp.width,bmp.height));
+    const c = document.createElement('canvas'); c.width = bmp.width*s; c.height = bmp.height*s;
+    c.getContext('2d').drawImage(bmp,0,0,c.width,c.height); cur.photos.push(c.toDataURL('image/jpeg',.72));
+  }
+  $('file').value = ''; drawPhotos();
+};
+const closeEditor = () => { $('edit').classList.add('hide'); $('list').classList.remove('hide'); load(); };
+$('back').onclick = closeEditor;
+$('save').onclick = async () => {
+  Object.assign(cur, {date:$('date').value||today(), title:$('title').value.trim(), text:$('text').value,
+    tags:[...new Set($('etags').value.split(',').map(t => t.trim().replace(/^#/,'').toLowerCase()).filter(Boolean))], updated:Date.now(), dirty:true});
+  await put(cur); closeEditor(); sync();
+};
+$('del').onclick = async () => {
+  if (!confirm('Delete this entry?')) return;
+  if (cur.driveId) { await put({...cur, deleted:true, dirty:true}); } else await rm(cur.id);
+  closeEditor(); sync();
+};
+
+// ---- Google Drive sync ----
+const status = t => $('status').textContent = t;
+function initAuth() {
+  if (!window.google || !google.accounts) return setTimeout(initAuth, 400);
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: CLIENT_ID, scope: 'https://www.googleapis.com/auth/drive.file',
+    callback: r => { if (r.access_token) { token = r.access_token; localStorage.signedIn = '1'; $('sync').textContent = 'Sync'; sync(); } else status('Sign-in failed') }
+  });
+  if (localStorage.signedIn && navigator.onLine) tokenClient.requestAccessToken({prompt:''});
+}
+$('sync').onclick = () => token ? sync() : tokenClient ? tokenClient.requestAccessToken({prompt: localStorage.signedIn ? '' : 'consent'}) : status('Offline: Google not loaded');
+window.addEventListener('online', () => token ? sync() : localStorage.signedIn && tokenClient && tokenClient.requestAccessToken({prompt:''}));
+
+async function api(url, opt = {}) {
+  const r = await fetch(url, {...opt, headers:{Authorization:'Bearer '+token, ...(opt.headers||{})}});
+  if (r.status === 401) { token = null; $('sync').textContent = 'Sign in'; throw new Error('Session expired. Tap Sign in.'); }
+  if (!r.ok) throw new Error('Drive error ' + r.status);
+  return r;
+}
+async function getFolder() {
+  if (folderId) return folderId;
+  const q = encodeURIComponent("name='My Journal' and mimeType='application/vnd.google-apps.folder' and trashed=false");
+  const found = (await (await api(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`)).json()).files;
+  if (found.length) folderId = found[0].id;
+  else folderId = (await (await api('https://www.googleapis.com/drive/v3/files', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:'My Journal', mimeType:'application/vnd.google-apps.folder'})})).json()).id;
+  localStorage.folderId = folderId; return folderId;
+}
+async function upload(e, parent) {
+  const meta = e.driveId ? {} : {name:e.id+'.json', parents:[parent]};
+  const b = 'jb' + Date.now(), {dirty, driveId, ...clean} = e;
+  const body = `--${b}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(meta)}\r\n--${b}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(clean)}\r\n--${b}--`;
+  const url = 'https://www.googleapis.com/upload/drive/v3/files' + (e.driveId ? '/'+e.driveId : '') + '?uploadType=multipart&fields=id,modifiedTime';
+  return (await api(url, {method: e.driveId?'PATCH':'POST', headers:{'Content-Type':'multipart/related; boundary='+b}, body})).json();
+}
+let syncing = false;
+async function sync() {
+  if (!token || syncing || !navigator.onLine) return;
+  syncing = true; status('Syncing…');
+  try {
+    const parent = await getFolder(), local = await all(), byDrive = Object.fromEntries(local.filter(e => e.driveId).map(e => [e.driveId, e]));
+    // push local changes
+    for (const e of local.filter(e => e.dirty)) {
+      if (e.deleted) { if (e.driveId) await api('https://www.googleapis.com/drive/v3/files/'+e.driveId, {method:'DELETE'}); await rm(e.id); }
+      else { const r = await upload(e, parent); await put({...e, driveId:r.id, dirty:false, synced:r.modifiedTime}); }
+    }
+    // pull remote changes
+    const q = encodeURIComponent(`'${parent}' in parents and trashed=false`);
+    const remote = (await (await api(`https://www.googleapis.com/drive/v3/files?q=${q}&pageSize=1000&fields=files(id,modifiedTime)`)).json()).files;
+    const remoteIds = new Set(remote.map(f => f.id));
+    for (const f of remote) {
+      const l = byDrive[f.id];
+      if (l && (l.dirty || l.synced === f.modifiedTime)) continue;
+      const e = await (await api(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`)).json();
+      await put({...e, driveId:f.id, dirty:false, synced:f.modifiedTime});
+    }
+    for (const e of (await all())) if (e.driveId && !e.dirty && !remoteIds.has(e.driveId)) await rm(e.id); // deleted elsewhere
+    status('Synced ' + new Date().toLocaleTimeString());
+  } catch (err) { status(err.message); }
+  syncing = false; load();
+}
+
+load(); initAuth();
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+</script>
+</body>
+</html>
